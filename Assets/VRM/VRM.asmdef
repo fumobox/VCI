@@ -2,15 +2,14 @@
     "name": "VRM",
     "references": [
         "MToon",
+        "DepthFirstScheduler",
         "UniUnlit",
+        "UniHumanoid",
+        "UniJSON",
         "ShaderProperty.Runtime"
     ],
     "optionalUnityReferences": [],
     "includePlatforms": [],
     "excludePlatforms": [],
-    "allowUnsafeCode": false,
-    "overrideReferences": false,
-    "precompiledReferences": [],
-    "autoReferenced": true,
-    "defineConstraints": []
+    "allowUnsafeCode": false
 }
