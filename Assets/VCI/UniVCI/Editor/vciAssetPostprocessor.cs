@@ -1,8 +1,8 @@
 ﻿using System;
 using System.IO;
 using UnityEditor;
-using VCIDepthFirstScheduler;
-using VCIGLTF;
+using DepthFirstScheduler;
+using UniGLTF;
 
 namespace VCI
 {
@@ -40,13 +40,8 @@ namespace VCI
                 //
                 importer.Load();
                 importer.SetupCoroutine().CoroutineToEnd();
-                importer.SetupPhysics();
-                importer.SetupAttachable();
-                importer.SetupEffekseer().CoroutineToEnd();
-                importer.SetupText();
-                importer.SetupSpringBone();
-                importer.SetupPlayerSpawnPoint();
-                importer.SetupLocationBounds();
+                importer.EnablePhysicalBehaviour(true);
+                importer.ExportScriptFile(prefabPath);
                 importer.SaveAsAsset(prefabPath);
                 importer.EditorDestroyRoot();
             };

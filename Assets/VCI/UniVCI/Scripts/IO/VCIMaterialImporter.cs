@@ -1,7 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
-using VCIGLTF;
+using UniGLTF;
 
 namespace VCI
 {
@@ -48,7 +48,10 @@ namespace VCI
                 src.pbrMetallicRoughness.baseColorFactor[3] = linearColor[3];
             }
 
-            if (i == 0 && m_materials.Count == 0) return base.CreateMaterial(i, src, hasVertexColor);
+            if (i == 0 && m_materials.Count == 0)
+            {
+                return base.CreateMaterial(i, src, hasVertexColor);
+            }
 
             var item = m_materials[i];
             var shaderName = item.shader;
@@ -59,12 +62,35 @@ namespace VCI
                 // no shader
                 //
                 if (VRM_SHADER_NAMES.Contains(shaderName))
+                {
                     Debug.LogErrorFormat(
                         "shader {0} not found. set Assets/VRM/Shaders/VRMShaders to Edit - project setting - Graphics - preloaded shaders",
                         shaderName);
+                }
                 else
+                {
                     Debug.LogFormat("unknown shader {0}.", shaderName);
-                return base.CreateMaterial(i, src, hasVertexColor);
+                }
+
+                var standardMaterial = base.CreateMaterial(i, src, hasVertexColor);
+
+                
+                // VCAST_materials_pbr拡張が存在する場合はパラメータを上書きする
+                if (src.extensions != null)
+                {
+                    glTF_VCAST_materials_pbr extensions;
+                    if(src.extensions.TryDeserializeExtensions(glTF_VCAST_materials_pbr.ExtensionName, glTF_VCAST_materials_pbr_Deserializer.Deserialize, out extensions))
+                    {
+                        // emissiveFactor
+                        var emissiveFactor = extensions.emissiveFactor;
+                        if (emissiveFactor != null && emissiveFactor.Length == 3)
+                        {
+                            standardMaterial.SetColor("_EmissionColor", new Color(emissiveFactor[0], emissiveFactor[1], emissiveFactor[2]));
+                        }
+                    }
+                }
+
+                return standardMaterial;
             }
 
             //
@@ -74,8 +100,13 @@ namespace VCI
             material.name = item.name;
             material.renderQueue = item.renderQueue;
 
-            foreach (var kv in item.floatProperties) material.SetFloat(kv.Key, kv.Value);
+            foreach (var kv in item.floatProperties)
+            {
+                material.SetFloat(kv.Key, kv.Value);
+            }
+
             foreach (var kv in item.vectorProperties)
+            {
                 if (item.textureProperties.ContainsKey(kv.Key))
                 {
                     // texture offset & scale
@@ -88,6 +119,7 @@ namespace VCI
                     var v = new Vector4(kv.Value[0], kv.Value[1], kv.Value[2], kv.Value[3]);
                     material.SetVector(kv.Key, v);
                 }
+            }
 
             foreach (var kv in item.textureProperties)
             {
@@ -96,18 +128,32 @@ namespace VCI
                 {
                     var converted = texture.ConvertTexture(kv.Key);
                     if (converted != null)
+                    {
                         material.SetTexture(kv.Key, converted);
+                    }
                     else
+                    {
                         material.SetTexture(kv.Key, texture.Texture);
+                    }
                 }
             }
 
             foreach (var kv in item.keywordMap)
+            {
                 if (kv.Value)
+                {
                     material.EnableKeyword(kv.Key);
+                }
                 else
+                {
                     material.DisableKeyword(kv.Key);
-            foreach (var kv in item.tagMap) material.SetOverrideTag(kv.Key, kv.Value);
+                }
+            }
+
+            foreach (var kv in item.tagMap)
+            {
+                material.SetOverrideTag(kv.Key, kv.Value);
+            }
 
             return material;
         }

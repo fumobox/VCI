@@ -7,7 +7,7 @@
         "Effekseer",
         "Unity.TextMeshPro",
         "NAudio",
-        "VCIDepthFirstScheduler"
+        "UniGLTF"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

@@ -3,8 +3,8 @@ using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
-using VCIGLTF;
-using VCIJSON;
+using UniGLTF;
+using UniJSON;
 
 namespace VCI
 {
@@ -21,33 +21,56 @@ namespace VCI
 
         public const int MAJOR = {0};
         public const int MINOR = {1};
+        public const int PATCH = {2};
 
         public const string VERSION = ""{0}.{1}"";
+        public const string PATCH_NUMBER = ""{2}"";
     }}
 }}
 ";
 
 #if VCI_DEVELOP
-        [MenuItem(VCIVersion.MENU + "/Increment")]
+        [MenuItem(VCIVersion.MENU + "/IncrementVersion")]
 #endif
         private static void IncrementVersion()
         {
-            var source = string.Format(template, VCIVersion.MAJOR, VCIVersion.MINOR + 1);
+            var source = string.Format(template, VCIVersion.MAJOR, VCIVersion.MINOR + 1, 0);
             File.WriteAllText(path, source);
             AssetDatabase.Refresh();
         }
 
 #if VCI_DEVELOP
-        [MenuItem(VCIVersion.MENU + "/Decrement")]
+        [MenuItem(VCIVersion.MENU + "/DecrementVersion")]
 #endif
         private static void DecrementVersion()
         {
-            var source = string.Format(template, VCIVersion.MAJOR, VCIVersion.MINOR - 1);
+            var source = string.Format(template, VCIVersion.MAJOR, VCIVersion.MINOR - 1, 0);
             File.WriteAllText(path, source);
             AssetDatabase.Refresh();
         }
 
-        private static string GetTitle(ListTreeNode<JsonValue> node)
+#if VCI_DEVELOP
+        [MenuItem(VCIVersion.MENU + "/IncrementPatch")]
+#endif
+        private static void IncrementPatch()
+        {
+            var source = string.Format(template, VCIVersion.MAJOR, VCIVersion.MINOR, VCIVersion.PATCH + 1);
+            File.WriteAllText(path, source);
+            AssetDatabase.Refresh();
+        }
+
+
+#if VCI_DEVELOP
+        [MenuItem(VCIVersion.MENU + "/DecrementPatch")]
+#endif
+        private static void DecrementPatch()
+        {
+            var source = string.Format(template, VCIVersion.MAJOR, VCIVersion.MINOR, VCIVersion.PATCH - 1);
+            File.WriteAllText(path, source);
+            AssetDatabase.Refresh();
+        }
+
+        private static string GetTitle(JsonNode node)
         {
             try
             {
@@ -61,7 +84,7 @@ namespace VCI
             return "";
         }
 
-        private static void TraverseItem(ListTreeNode<JsonValue> node, JsonFormatter f, FilePath dir)
+        private static void TraverseItem(JsonNode node, JsonFormatter f, FilePath dir)
         {
             var title = GetTitle(node);
             if (string.IsNullOrEmpty(title))
@@ -97,7 +120,7 @@ namespace VCI
             }
         }
 
-        private static void Traverse(ListTreeNode<JsonValue> node, JsonFormatter f, FilePath dir)
+        private static void Traverse(JsonNode node, JsonFormatter f, FilePath dir)
         {
             if (node.IsArray())
             {
@@ -152,7 +175,7 @@ namespace VCI
             }
         }
 
-        private static FilePath SplitAndWriteJson(ListTreeNode<JsonValue> parsed, FilePath dir, string name)
+        private static FilePath SplitAndWriteJson(JsonNode parsed, FilePath dir, string name)
         {
             var f = new JsonFormatter(4);
             Traverse(parsed, f, dir);
@@ -162,34 +185,6 @@ namespace VCI
             Debug.LogFormat("write JsonSchema: {0}", path.FullPath);
             File.WriteAllText(path.FullPath, json);
             return path;
-        }
-
-        private static void ExportJsonSchema(JsonSchema schema, string name)
-        {
-            var f = new JsonFormatter(2);
-            schema.ToJson(f);
-            var json = f.ToString();
-
-            var dir = new FilePath(Application.dataPath + "/../specification/VCI/0.0/schema");
-            dir.EnsureFolder();
-
-            SplitAndWriteJson(JsonParser.Parse(json), dir, name);
-        }
-
-
-#if VCI_DEVELOP
-        [MenuItem(VCIVersion.MENU + "/Export JsonSchema")]
-#endif
-        private static void ExportJsonSchema()
-        {
-            ExportJsonSchema(JsonSchema.FromType<glTF_VCAST_vci_audio>(), "audio");
-            ExportJsonSchema(JsonSchema.FromType<glTF_VCAST_vci_colliders>(), "collider");
-            ExportJsonSchema(JsonSchema.FromType<glTF_VCAST_vci_embedded_script>(), "embedded_script");
-            ExportJsonSchema(JsonSchema.FromType<glTF_VCAST_vci_item>(), "item");
-            ExportJsonSchema(JsonSchema.FromType<glTF_VCAST_vci_joints>(), "joint");
-            ExportJsonSchema(JsonSchema.FromType<glTF_VCAST_vci_material_unity>(), "material_unity");
-            ExportJsonSchema(JsonSchema.FromType<glTF_VCAST_vci_meta>(), "meta");
-            ExportJsonSchema(JsonSchema.FromType<glTF_VCAST_vci_rigidbody>(), "rigidbody");
         }
     }
 }

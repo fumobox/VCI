@@ -15,6 +15,7 @@ namespace VCI
     {
         private const string DATE_FORMAT = "yyyyMMdd";
         private const string PREFIX = "UniVCI";
+        private const string PACKAGE_DIR = @"BuildPackages";
 
         private static string System(string dir, string fileName, string args)
         {
@@ -52,12 +53,26 @@ namespace VCI
         {
             //var date = DateTime.Today.ToString(DATE_FORMAT);
 
-            var path = string.Format("{0}/{1}.unitypackage",
+            var path = string.Format("{0}/{1}.{2}.unitypackage",
                 folder,
-                VCIVersion.VCI_VERSION
+                VCIVersion.VCI_VERSION,
+                VCIVersion.PATCH_NUMBER
             ).Replace("\\", "/");
 
             return path;
+        }
+
+        private static void CleanUpDirectory(string targetDirectoryPath)
+        {
+            if (Directory.Exists(targetDirectoryPath))
+            {
+                string[] filePaths = Directory.GetFiles(targetDirectoryPath);
+                foreach (string filePath in filePaths)
+                {
+                    File.SetAttributes(filePath, FileAttributes.Normal);
+                    File.Delete(filePath);
+                }
+            }
         }
 
         private static IEnumerable<string> EnumerateFiles(string path, Func<string, bool> isExclude = null)
@@ -126,14 +141,7 @@ namespace VCI
         private static string[] IncluceFiles = new string[]
         {
             "Assets/VCI/UniVCI",
-            "Assets/VCI/VCIGLTF",
-            "Assets/VCI/VCIJSON",
-            "Assets/VCI/VCIDepthFirstScheduler",
-
-            "Assets/VRM/MToon",
-            "Assets/VRM/ShaderProperty",
-            "Assets/VRM/UniGLTF",
-            "Assets/VRM/UniUnlit",
+            "Assets/VCI/Runtime",
 
             "Assets/Effekseer/Editor",
             "Assets/Effekseer/Materials",
@@ -151,7 +159,6 @@ namespace VCI
         private static string[] adfFiles = new string[]
         {
             "Assets/VCI/VCI.asmdef",
-            "Assets/VRM/VRM.asmdef",
             "Assets/Effekseer/EffekseerAssemblyDefinition.asmdef",
         };
 
@@ -163,23 +170,21 @@ namespace VCI
 #endif
         public static void CreateUnityPackage()
         {
-            var folder = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var folder = Path.Combine(Path.GetFullPath(Path.Combine(Application.dataPath, "..")), PACKAGE_DIR);
+
+            if(!Directory.Exists(folder))
+            {
+                Directory.CreateDirectory(folder);
+            }
+
+            CleanUpDirectory(folder);
 
             var path = GetPath(folder);
-            /*
-            if (File.Exists(path))
-            {
-                Debug.LogErrorFormat("{0} is already exists", path);
-                return;
-            }
-            */
-
             {
                 var filesA = EnumerateFiles("Assets/VCI", IsExclude).ToArray();
-                var filesB = EnumerateFiles("Assets/VRM", IsExclude).ToArray();
-                var filesC = EnumerateFiles("Assets/Effekseer", IsExclude).ToArray();
-                var filesD = EnumerateFiles("Assets/NAudio", IsExclude).ToArray();
-                var files = adfFiles.Concat(filesA.Concat(filesB.Concat(filesC.Concat(filesD)))).ToArray();
+                var filesB = EnumerateFiles("Assets/Effekseer", IsExclude).ToArray();
+                var filesC = EnumerateFiles("Assets/NAudio", IsExclude).ToArray();
+                var files = adfFiles.Concat(filesA.Concat(filesB.Concat(filesC))).ToArray();
 
                 // Default Package
                 Debug.LogFormat("{0}",
@@ -189,14 +194,16 @@ namespace VCI
                     ExportPackageOptions.Default);
 
                 // DigitalSignature Package
-                var digitalSignatureFiles = EnumerateFiles("Assets/VCI-DigitalSignature", IsExclude).ToArray();
-                var fileName = Path.GetFileNameWithoutExtension(path);
-                var ext = Path.GetExtension(path);
-                path = Path.GetDirectoryName(path) + "\\" + fileName + "_digitalSignature" + ext;
-                files = files.Concat(digitalSignatureFiles).ToArray();
-                AssetDatabase.ExportPackage(files
-                    , path,
-                    ExportPackageOptions.Default);
+                {
+                    var digitalSignatureFiles = EnumerateFiles("Assets/VCI-DigitalSignature", IsExclude).ToArray();
+                    var fileName = Path.GetFileNameWithoutExtension(path);
+                    var ext = Path.GetExtension(path);
+                    var exportPath = Path.GetDirectoryName(path) + "\\" + fileName + "_digitalSignature" + ext;
+                    files = files.Concat(digitalSignatureFiles).ToArray();
+                    AssetDatabase.ExportPackage(files
+                        , exportPath,
+                        ExportPackageOptions.Default);
+                }
             }
 
             Debug.LogFormat("exported: {0}", path);

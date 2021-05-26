@@ -1,8 +1,8 @@
 ﻿using System;
 using System.IO;
+using UniGLTF;
 using UnityEditor;
 using UnityEngine;
-using VCIGLTF;
 
 namespace VCI
 {
@@ -16,15 +16,24 @@ namespace VCI
 #if UNITY_STANDALONE_WIN && UNITY_EDITOR
             EditorApplication.isPlaying = false;
 
-            if (!Validate()) return;
+            var rootGameObject = default(GameObject);
+            try
+            {
+                rootGameObject = GameObjectSelectionService.GetSingleSelectedObject();
+                VCIValidator.ValidateVCIRequirements(rootGameObject);
+            }
+            catch(VCIValidatorException e)
+            {
+                VCIValidationErrorDialog.ShowErrorDialog(e);
+                GUIUtility.ExitGUI();
+                return;
+            }
 
             try
             {
                 // save dialog
-                var root = Selection.activeObject as GameObject;
-
                 var path = VCI.FileDialogForWindows.SaveDialog("Save " + VCIVersion.EXTENSION,
-                    root.name + VCIVersion.EXTENSION);
+                    rootGameObject.name + VCIVersion.EXTENSION);
 
                 //var path = EditorUtility.SaveFilePanel(
                 //    "Save " + VCIVersion.EXTENSION,
@@ -33,15 +42,7 @@ namespace VCI
                 //    VCIVersion.EXTENSION.Substring(1));
                 if (string.IsNullOrEmpty(path)) return;
 
-                // export
-                var gltf = new glTF();
-                using (var exporter = new VCIExporter(gltf))
-                {
-                    exporter.Prepare(root);
-                    exporter.Export();
-                }
-
-                var bytes = gltf.ToGlbBytes();
+                var bytes = ExportVci(rootGameObject);
                 File.WriteAllBytes(path, bytes);
 
                 if (path.StartsWithUnityAssetPath())
@@ -56,58 +57,37 @@ namespace VCI
                     System.Diagnostics.Process.Start("explorer.exe", " /e,/select," + path.Replace("/", "\\"));
                 }
             }
+            catch(Exception ex)
+            {
+                Debug.LogError(ex);
+            }
             finally
             {
-                GUIUtility.ExitGUI();
+                // TODO: ツールバーからExport VCIを行うとExitGUIExceptionが飛ぶため、いったん握りつぶす
+                try
+                {
+                    GUIUtility.ExitGUI();
+                }
+                catch
+                {
+                }
             }
 #else
             Debug.LogError("this function works only on Windows");
 #endif
         }
 
-        public static bool Validate()
+        public static byte[] ExportVci(GameObject root)
         {
-            // Validation
-            try
+            // export
+            var gltf = new glTF();
+            using (var exporter = new VCIExporter(gltf))
             {
-                var selectedGameObjects = Selection.gameObjects;
-                if (selectedGameObjects.Length == 0)
-                    throw new VCIValidatorException(ValidationErrorType.GameObjectNotSelected);
-
-                if (2 <= selectedGameObjects.Length)
-                    throw new VCIValidatorException(ValidationErrorType.MultipleSelection);
-
-                var vciObject = selectedGameObjects[0].GetComponent<VCIObject>();
-                if (vciObject == null)
-                    throw new VCIValidatorException(ValidationErrorType.VCIObjectNotAttached);
-
-                VCIValidator.ValidateVCIObject(vciObject);
+                exporter.Prepare(root);
+                exporter.Export(default);
             }
-            catch (VCIValidatorException e)
-            {
-                var title =  $"Error{(int)e.ErrorType}";
 
-                var text = "";
-
-                if (string.IsNullOrEmpty(e.Message))
-                {
-                    text = VCIConfig.GetText($"error{(int)e.ErrorType}");
-                }
-                else
-                {
-                    text = e.Message;
-                }
-
-                text = text.Replace("\\n", Environment.NewLine);
-
-                if(e.ErrorType == ValidationErrorType.InvalidCharacter)
-                    EditorGUILayout.HelpBox(e.Message, MessageType.Warning);
-
-                EditorUtility.DisplayDialog(title, text, "OK");
-                GUIUtility.ExitGUI();
-                return false;
-            }
-            return true;
+            return gltf.ToGlbBytes();
         }
     }
 }

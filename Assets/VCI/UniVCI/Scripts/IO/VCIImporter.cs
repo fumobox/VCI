@@ -1,22 +1,25 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using TMPro;
 using UnityEngine;
-using VCIGLTF;
-using VCIJSON;
+using UnityEngine.Rendering;
+using UniGLTF;
+using UniJSON;
 #if UNITY_EDITOR
 using UnityEditor;
-
 #endif
 
 namespace VCI
 {
     public class VCIImporter : ImporterContext
     {
+        private VCI.glTF_VCAST_vci_meta VciMeta { get; set; }
+
         public Dictionary<string, string> AudioAssetPathList = new Dictionary<string, string>();
 
         public List<Effekseer.EffekseerEmitter> EffekseerEmitterComponents = new List<Effekseer.EffekseerEmitter>();
@@ -24,10 +27,44 @@ namespace VCI
 
         public VCIObject VCIObject { get; private set; }
 
-        public IFontProvider FontProvider { get; set; }
+        private IFontProvider _fontProvider;
 
-        public VCIImporter()
+        private List<Collider> _colliderComponents = new List<Collider>();
+
+        public class RigidbodySetting
         {
+            public RigidbodyConstraints Constraints { get; set; }
+            public bool IsKinematic { get; private set; }
+            public bool UseGravity { get; private set; }
+
+            public RigidbodySetting(Rigidbody rigidbody)
+            {
+                Constraints = rigidbody.constraints;
+                IsKinematic = rigidbody.isKinematic;
+                UseGravity = rigidbody.useGravity;
+            }
+        }
+
+        private readonly Dictionary<Rigidbody, RigidbodySetting> _rigidBodySettings =
+            new Dictionary<Rigidbody, RigidbodySetting>();
+
+        public Dictionary<Rigidbody, RigidbodySetting> RigidBodySettings => _rigidBodySettings;
+
+        public bool IsLocation { get; private set; }
+
+        private readonly IVciDefaultLayerProvider _vciDefaultLayerProvider;
+        private readonly IVciColliderLayerProvider _vciColliderLayerProvider;
+
+        public VCIImporter(
+            bool isLocation = false,
+            IVciDefaultLayerProvider vciDefaultLayerProvider = null,
+            IVciColliderLayerProvider vciColliderLayerProvider = null,
+            IFontProvider fontProvider = null)
+        {
+            IsLocation = isLocation;
+            _vciDefaultLayerProvider = vciDefaultLayerProvider ?? new VciColldierEditorSetting();
+            _vciColliderLayerProvider = vciColliderLayerProvider ?? new VciColldierEditorSetting();
+            _fontProvider = fontProvider;
         }
 
         public override void Parse(string path, byte[] bytes)
@@ -51,7 +88,7 @@ namespace VCI
 
         private string GetVersionValue(string exportedVciVersion)
         {
-            if(string.IsNullOrEmpty(exportedVciVersion))
+            if (string.IsNullOrEmpty(exportedVciVersion))
             {
                 throw new Exception("exportedVciVersion is empty.");
             }
@@ -69,14 +106,14 @@ namespace VCI
         private bool ImportableVersionCheck(string exportedVciVersion)
         {
             var version = GetVersionValue(exportedVciVersion);
-            if(string.IsNullOrEmpty(version))
+            if (string.IsNullOrEmpty(version))
             {
                 return false;
             }
 
-            int itemExportedVersion = (int)(float.Parse(version) * 100);
-            int uniVciVersion = (int)(float.Parse(VCIVersion.VERSION) * 100);
-            if( itemExportedVersion > uniVciVersion)
+            int itemExportedVersion = (int) Math.Round(float.Parse(version, CultureInfo.InvariantCulture) * 100);
+            int uniVciVersion = (int) Math.Round(float.Parse(VCIVersion.VERSION, CultureInfo.InvariantCulture) * 100);
+            if (itemExportedVersion > uniVciVersion)
             {
                 return false;
             }
@@ -86,52 +123,59 @@ namespace VCI
 
         public override void ParseJson(string json, IStorage storage)
         {
+            // Deserialize
             base.ParseJson(json, storage);
-            var parsed = JsonParser.Parse(Json);
 
-            if(parsed.ContainsKey("extensions")
-                && parsed["extensions"].ContainsKey("VCAST_vci_meta")
-            )
+            if(GLTF.extensions == null)
             {
-                var meta = parsed["extensions"]["VCAST_vci_meta"];
-                var version = meta["exporterVCIVersion"];
+                return;
+            }
 
-                if(!ImportableVersionCheck(version.Value.ToString()))
+            glTF_VCAST_vci_meta meta;
+            if (!GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_meta.ExtensionName, glTF_VCAST_vci_meta_Deserializer.Deserialize, out meta))
+            {
+                return;
+            }
+
+            VciMeta = meta;
+
+            // VersionCheck
+            if (VciMeta != null)
+            {
+                var version = VciMeta.exporterVCIVersion;
+
+                if (!ImportableVersionCheck(version))
                 {
-                    throw new Exception("The current UniVCI cannot read this VCI version. " + version.Value);
+                    throw new Exception("The current UniVCI cannot read this VCI version. " + version);
                 }
             }
 
-            if (parsed.ContainsKey("extensions")
-                && parsed["extensions"].ContainsKey(MATERIAL_EXTENSION_NAME)
-                && parsed["extensions"][MATERIAL_EXTENSION_NAME].ContainsKey("materials")
-            )
+            // Set MaterialImporter
+            glTF_VCAST_vci_material_unity material;
+            if(GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_material_unity.ExtensionName, glTF_VCAST_vci_material_unity_Deserializer.Deserialize, out material))
             {
                 // UniVCI v0.27以下のバージョンの場合は、baseColorをsrgbからlinearに変換した後にCreateMaterialを実行する
                 bool srgbToLinear = false;
-                if(parsed.ContainsKey("extensions")
-                    && parsed["extensions"].ContainsKey("VCAST_vci_meta")
-                )
+                if (material != null)
                 {
-                    var meta = parsed["extensions"]["VCAST_vci_meta"];
-                    var version = meta["exporterVCIVersion"];
-
-                    int exportedVciVersion = (int)(float.Parse(GetVersionValue(version.Value.ToString())) * 100);
-                    if(exportedVciVersion <= 27)
+                    var version = VciMeta.exporterVCIVersion;
+                    int exportedVciVersion = (int)Math.Round(float.Parse(GetVersionValue(version), CultureInfo.InvariantCulture) * 100);
+                    if (exportedVciVersion <= 27)
                     {
                         srgbToLinear = true;
                     }
                 }
 
-                var nodes = parsed["extensions"][MATERIAL_EXTENSION_NAME]["materials"];
-                SetMaterialImporter(new VCIMaterialImporter(this, glTF_VCI_Material.Parse(nodes), srgbToLinear));
-                SetAnimationImporter(new EachAnimationImporter());
+                SetMaterialImporter(new VCIMaterialImporter(this, material.materials, srgbToLinear));
             }
+
+            // Set AnimationImporter
+            SetAnimationImporter(new EachAnimationImporter());
         }
 
         protected override IEnumerator OnLoadModel()
         {
-            if (GLTF.extensions.VCAST_vci_meta == null)
+            if (VciMeta == null)
             {
                 base.OnLoadModel();
             }
@@ -139,14 +183,51 @@ namespace VCI
             yield break;
         }
 
+        protected override IEnumerable<UnityEngine.Object> ObjectsForSubAsset()
+        {
+            HashSet<Texture2D> textures = new HashSet<Texture2D>();
+            foreach (var x in GetTextures().SelectMany(y => y.GetTexturesForSaveAssets()))
+            {
+                if (!textures.Contains(x))
+                {
+                    textures.Add(x);
+                }
+            }
+            foreach (var x in textures) { yield return x; }
+            foreach (var x in GetMaterials()) { yield return x; }
+            foreach (var x in Meshes) { yield return x.Mesh; }
+            // Animationは独自に管理される
+        }
+
         public IEnumerator SetupCoroutine()
         {
             VCIObject = Root.AddComponent<VCIObject>();
             yield return ToUnity(meta => VCIObject.Meta = meta);
 
+            if (GLTF.extensions == null)
+            {
+                yield break;
+            }
+
+            if(VciMeta == null)
+            {
+                glTF_VCAST_vci_meta meta;
+                if (!GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_meta.ExtensionName, glTF_VCAST_vci_meta_Deserializer.Deserialize, out meta))
+                {
+                    yield break;
+                }
+                else
+                {
+                    VciMeta = meta;
+                }
+            }
+            
+
             // Script
-            if (GLTF.extensions.VCAST_vci_embedded_script != null)
-                VCIObject.Scripts.AddRange(GLTF.extensions.VCAST_vci_embedded_script.scripts.Select(x =>
+            glTF_VCAST_vci_embedded_script scriptExtension;
+            if (GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_embedded_script.ExtensionName, glTF_VCAST_vci_embedded_script_Deserializer.Deserialize, out scriptExtension))
+            {
+                VCIObject.Scripts.AddRange(scriptExtension.scripts.Select(x =>
                 {
                     var source = "";
                     try
@@ -167,37 +248,88 @@ namespace VCI
                         source = source
                     };
                 }));
+            }
+
+            var exportedVciVersion = (int) Math.Round(float.Parse(GetVersionValue(VCIObject.Meta.exporterVersion),
+                CultureInfo.InvariantCulture) * 100);
 
             // Audio
-            if (GLTF.extensions.VCAST_vci_audios != null
-                && GLTF.extensions.VCAST_vci_audios.audios != null)
+            if (GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_audios.ExtensionName, glTF_VCAST_vci_audios_Deserializer.Deserialize, out glTF_VCAST_vci_audios audioExtension))
             {
-                var root = Root;
-                foreach (var audio in GLTF.extensions.VCAST_vci_audios.audios)
+                // collect AudioClips from vci_audios
+                var audioClips = new List<AudioClip>();
+                foreach (var audio in audioExtension.audios)
                 {
+                    AudioClip audioClip = null;
+
 #if ((NET_4_6 || NET_STANDARD_2_0) && UNITY_2017_1_OR_NEWER)
                     if (Application.isPlaying)
                     {
                         var bytes = GLTF.GetViewBytes(audio.bufferView);
-                        yield return AudioImporter.Import(audio, bytes, root);
+                        yield return AudioImporter.Import(audio, bytes, clip => audioClip = clip);
                     }
                     else
 #endif
                     {
 #if UNITY_EDITOR
-                        var audioClip =
+                        audioClip =
                             AssetDatabase.LoadAssetAtPath(AudioAssetPathList[audio.name], typeof(AudioClip)) as
                                 AudioClip;
-                        if (audioClip != null)
-                        {
-                            var source = root.AddComponent<AudioSource>();
-                            source.clip = audioClip;
-                        }
-                        else
-                        {
-                            Debug.LogWarning("AudioFile NotFound: " + audio.name);
-                        }
 #endif
+                    }
+
+                    if (audioClip == null)
+                    {
+                        Debug.LogWarning($"Failed to import audio file: {audio.name}");
+                    }
+                    else
+                    {
+                        audioClips.Add(audioClip);
+                    }
+                }
+
+                // * ver 0.32でAudioSource拡張が追加
+                // - それ以前のバージョンで出力されている場合、
+                // - すべてのAudioClip, AudioSourceはRootにアタッチされる
+                if (exportedVciVersion < 32)
+                {
+                    foreach (var audioClip in audioClips)
+                    {
+                        var audioSource = Root.AddComponent<AudioSource>();
+                        audioSource.clip = audioClip;
+                        audioSource.playOnAwake = false;
+                        audioSource.loop = false;
+                        audioSource.spatialBlend = 0;
+                        audioSource.dopplerLevel = 0;
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < GLTF.nodes.Count; i++)
+                    {
+                        var node = GLTF.nodes[i];
+
+                        if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_audio_sources.ExtensionName, glTF_VCAST_vci_audio_sources_Deserializer.Deserialize, out glTF_VCAST_vci_audio_sources audioSourceExtensions))
+                        {
+                            foreach (var audioSourceExtension in audioSourceExtensions.audioSources)
+                            {
+                                var audioClip = audioClips[audioSourceExtension.audio];
+
+                                if (audioClip != null)
+                                {
+                                    var audioSource = Nodes[i].gameObject.AddComponent<AudioSource>();
+                                    audioSource.clip = audioClip;
+                                    audioSource.playOnAwake = false;
+                                    audioSource.loop = false;
+                                    audioSource.spatialBlend = audioSourceExtension.spatialBlend;
+                                    audioSource.dopplerLevel = 0;
+                                }
+                                else
+                                {
+                                    Debug.LogWarning($"Audio file at index {audioSourceExtension.audio} was not found.");
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -215,24 +347,73 @@ namespace VCI
                 var node = GLTF.nodes[i];
                 if (node.extensions != null)
                 {
-                    if (node.extensions.VCAST_vci_item != null)
+                    if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_item.ExtensionName, glTF_VCAST_vci_item_Deserializer.Deserialize, out glTF_VCAST_vci_item itemExtension))
                     {
                         var go = Nodes[i].gameObject;
                         var item = go.AddComponent<VCISubItem>();
-                        item.Grabbable = node.extensions.VCAST_vci_item.grabbable;
-                        item.Scalable = node.extensions.VCAST_vci_item.scalable;
-                        item.UniformScaling = node.extensions.VCAST_vci_item.uniformScaling;
-                        item.GroupId = node.extensions.VCAST_vci_item.groupId;
+                        item.NodeIndex = i;
+                        item.Grabbable = itemExtension.grabbable;
+                        item.Scalable = itemExtension.scalable;
+                        item.UniformScaling = itemExtension.uniformScaling;
+                        // UniVCI0.30で追加したフラグ。それ以前のVCIではGrabbable=trueならすべてTrueに
+                        item.Attractable = itemExtension.grabbable &&
+                                           (exportedVciVersion < 30 || itemExtension.attractable);
+                        item.GroupId = itemExtension.groupId;
                     }
                 }
+            }
+
+            // DefaultLayer
+            for (var i = 0; i < GLTF.nodes.Count; i++)
+            {
+                var node = GLTF.nodes[i];
+                var go = Nodes[i].gameObject;
+
+                if (IsLocation)
+                {
+                    go.layer = _vciDefaultLayerProvider.Location;
+                }
+                else
+                {
+                    go.layer = _vciDefaultLayerProvider.Item;
+                }
+            }
+
+            // Effekseer
+            SetupEffekseer();
+
+            // Text
+            SetupText();
+
+            // Physics
+            SetupPhysics(_vciColliderLayerProvider);
+            // Fix physics
+            EnablePhysicalBehaviour(false);
+
+            // Attachable
+            SetupAttachable();
+
+            // SpringBone
+            SetupSpringBone();
+
+            // PlayerSpawnPoint
+            SetupPlayerSpawnPoint();
+
+            // LocationBounds
+            SetupLocationBounds();
+
+
+            if (Application.isPlaying && IsLocation)
+            {
+                // Lightmap
+                yield return SetupLightmapCoroutine();
             }
         }
 
         /// <summary>
-        ///
+        /// 物理関係のインポート
         /// </summary>
-        /// <param name="replace">Rootオブジェクトのセットアップを1階層上げるのに使う</param>
-        public void SetupPhysics(GameObject rootReplaceTarget = null)
+        public void SetupPhysics(IVciColliderLayerProvider vciColliderLayer = null)
         {
             // Collider and Rigidbody
             for (var i = 0; i < GLTF.nodes.Count; i++)
@@ -240,17 +421,55 @@ namespace VCI
                 var node = GLTF.nodes[i];
                 var go = Nodes[i].gameObject;
 
-                if (go == Root && rootReplaceTarget != null) go = rootReplaceTarget;
-
                 if (node.extensions != null)
                 {
-                    if (node.extensions.VCAST_vci_collider?.colliders != null)
-                        foreach (var vciCollider in node.extensions.VCAST_vci_collider.colliders)
-                            glTF_VCAST_vci_Collider.AddColliderComponent(go, vciCollider);
+                    glTF_VCAST_vci_colliders colliderExtension;
+                    if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_colliders.ExtensionName, glTF_VCAST_vci_colliders_Deserializer.Deserialize, out colliderExtension))
+                    {
+                        foreach (var vciCollider in colliderExtension.colliders)
+                        {
+                            var collider = glTF_VCAST_vci_Collider.AddColliderComponent(go, vciCollider);
+                            _colliderComponents.Add(collider);
 
-                    if (node.extensions.VCAST_vci_rigidbody?.rigidbodies != null)
-                        foreach (var rigidbody in node.extensions.VCAST_vci_rigidbody.rigidbodies)
-                            glTF_VCAST_vci_Rigidbody.AddRigidbodyComponent(go, rigidbody);
+                            // set layer
+                            if (vciColliderLayer != null)
+                            {
+                                var layerNumber =
+                                    VciColliderSetting.GetLayerNumber(VciColliderSetting.VciColliderLayerTypes.Default,
+                                        vciColliderLayer);
+                                go.layer = (layerNumber != -1) ? layerNumber : 0;
+                            }
+
+                            if (!string.IsNullOrEmpty(vciCollider.layer) && vciColliderLayer != null)
+                            {
+                                var layer = VciColliderSetting.VciColliderLayerLabel.FirstOrDefault(x =>
+                                    x.Value == vciCollider.layer);
+                                if (!string.IsNullOrEmpty(layer.Value))
+                                {
+                                    go.layer = VciColliderSetting.GetLayerNumber(layer.Key, vciColliderLayer);
+                                }
+                            }
+                        }
+                    }
+
+                    glTF_VCAST_vci_rigidbody rigidbodyExtension;
+                    glTF_VCAST_vci_item itemExtension;
+                    if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_rigidbody.ExtensionName, glTF_VCAST_vci_rigidbody_Deserializer.Deserialize, out rigidbodyExtension))
+                    {
+                        foreach (var rigidbody in rigidbodyExtension.rigidbodies)
+                        {
+                            var rb = glTF_VCAST_vci_Rigidbody.AddRigidbodyComponent(go, rigidbody);
+                            _rigidBodySettings.Add(rb, new RigidbodySetting(rb));
+                        }
+                    }
+                    else if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_item.ExtensionName, glTF_VCAST_vci_item_Deserializer.Deserialize, out itemExtension))
+                    {
+                        // SubItemだがVCAST_vci_rigidbody拡張が無い場合、ここで追加する
+                        var rb = go.GetOrAddComponent<Rigidbody>();
+                        rb.isKinematic = true;
+                        rb.useGravity = false;
+                        _rigidBodySettings.Add(rb, new RigidbodySetting(rb));
+                    }
                 }
             }
 
@@ -259,13 +478,18 @@ namespace VCI
             {
                 var node = GLTF.nodes[i];
                 var go = Nodes[i].gameObject;
-                if (go == Root && rootReplaceTarget != null) go = rootReplaceTarget;
 
                 if (node.extensions != null)
-                    if (node.extensions.VCAST_vci_joints != null
-                        && node.extensions.VCAST_vci_joints.joints != null)
-                        foreach (var joint in node.extensions.VCAST_vci_joints.joints)
+                {
+                    glTF_VCAST_vci_joints jointExtension;
+                    if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_joints.ExtensionName, glTF_VCAST_vci_joints_Deserializer.Deserialize, out jointExtension))
+                    {
+                        foreach (var joint in jointExtension.joints)
+                        {
                             glTF_VCAST_vci_joint.AddJointComponent(go, joint, Nodes);
+                        }
+                    }
+                }
             }
         }
 
@@ -277,52 +501,100 @@ namespace VCI
             {
                 var node = GLTF.nodes[i];
 
-                if (node.extensions != null && node.extensions.VCAST_vci_attachable != null)
+                if (node.extensions != null)
                 {
-                    var go = Nodes[i].gameObject;
-                    var attachable = go.AddComponent<VCIAttachable>();
-                    attachable.AttachableHumanBodyBones = node.extensions.VCAST_vci_attachable.attachableHumanBodyBones.Select(x =>
+                    glTF_VCAST_vci_attachable attachableExtension;
+                    if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_attachable.ExtensionName, glTF_VCAST_vci_attachable_Deserializer.Deserialize, out attachableExtension))
                     {
-                        foreach (HumanBodyBones bone in Enum.GetValues(typeof(HumanBodyBones)))
+                        var go = Nodes[i].gameObject;
+                        var attachable = go.AddComponent<VCIAttachable>();
+                        attachable.AttachableHumanBodyBones = attachableExtension.attachableHumanBodyBones.Select(x =>
                         {
-                            if (x == bone.ToString())
+                            foreach (HumanBodyBones bone in Enum.GetValues(typeof(HumanBodyBones)))
                             {
-                                return bone;
+                                if (x == bone.ToString())
+                                {
+                                    return bone;
+                                }
                             }
-                        }
 
-                        throw new Exception("unknown AttachableHumanBodyBones: " + x);
-                    }).ToArray();
+                            throw new Exception("unknown AttachableHumanBodyBones: " + x);
+                        }).ToArray();
 
-                    attachable.AttachableDistance = node.extensions.VCAST_vci_attachable.attachableDistance;
-                    attachable.Scalable = node.extensions.VCAST_vci_attachable.scalable;
-                    attachable.Offset = node.extensions.VCAST_vci_attachable.offset;
-                    attachableCount++;
+                        attachable.AttachableDistance = attachableExtension.attachableDistance;
+                        attachable.Scalable = attachableExtension.scalable;
+                        attachable.Offset = attachableExtension.offset;
+                        attachableCount++;
+                    }
                 }
             }
+
             return attachableCount;
         }
 
-        public virtual IEnumerator SetupEffekseer()
+        /// <summary>
+        /// VCI の物理挙動を有効・無効にする
+        /// </summary>
+        public void EnablePhysicalBehaviour(bool enable)
+        {
+            foreach (var collider in _colliderComponents)
+            {
+                if (collider != null)
+                {
+                    collider.enabled = enable;
+                }
+            }
+
+            foreach (var rigidBodySetting in _rigidBodySettings)
+            {
+                if (rigidBodySetting.Key != null)
+                {
+                    if (enable)
+                    {
+                        // Restore the original constraints.
+                        // NOTE: If EnablePhysicalBehaviour(false) was called before, OriginalConstraints contains
+                        //       the constraints that were present when EnablePhysicalBehaviour(false) was last called.
+                        //       If EnablePhysicalBehaviour(false) was never called, OriginalConstraints contains
+                        //       the constraints that were setup at the time when the Rigidbody was initialized.
+                        rigidBodySetting.Key.constraints = rigidBodySetting.Value.Constraints;
+                    }
+                    else
+                    {
+                        // Save constraints value to restore it later.
+                        rigidBodySetting.Value.Constraints = rigidBodySetting.Key.constraints;
+
+                        // Set constraints to FreezeAll to ensure that gameObjects aren't falling down due to gravity.
+                        rigidBodySetting.Key.constraints = RigidbodyConstraints.FreezeAll;
+                    }
+                }
+            }
+        }
+
+        public virtual void SetupEffekseer()
         {
             // Effekseer
-            if (GLTF.extensions != null && GLTF.extensions.Effekseer != null)
+            glTF_Effekseer effekseerExtension;
+            if (GLTF.extensions.TryDeserializeExtensions(glTF_Effekseer.ExtensionName, glTF_Effekseer_Deserializer.Deserialize, out effekseerExtension))
             {
                 for (var i = 0; i < GLTF.nodes.Count; i++)
                 {
                     var node = GLTF.nodes[i];
                     var go = Nodes[i].gameObject;
-                    if (node.extensions != null &&
-                        node.extensions.Effekseer_emitters != null &&
-                        node.extensions.Effekseer_emitters.emitters != null)
+                    glTF_Effekseer_emitters effekseerEmitterExtension;
+                    if (node.extensions.TryDeserializeExtensions(glTF_Effekseer_emitters.ExtensionName, glTF_Effekseer_emitters_Deserializer.Deserialize, out effekseerEmitterExtension))
                     {
-                        foreach (var emitter in node.extensions.Effekseer_emitters.emitters)
+                        if(effekseerEmitterExtension == null || effekseerEmitterExtension.emitters == null)
+                        {
+                            continue;
+                        }
+
+                        foreach (var emitter in effekseerEmitterExtension.emitters)
                         {
                             var effectIndex = emitter.effectIndex;
 
                             if (Application.isPlaying)
                             {
-                                var effect = GLTF.extensions.Effekseer.effects[effectIndex];
+                                var effect = effekseerExtension.effects[effectIndex];
                                 var bodySegment = GLTF.GetViewBytes(effect.body.bufferView);
                                 byte[] body = new byte[bodySegment.Count];
                                 Buffer.BlockCopy(bodySegment.Array, bodySegment.Offset, body, 0, body.Count());
@@ -332,8 +604,6 @@ namespace VCI
                                 {
                                     continue;
                                 }
-
-                                yield return null;
 
                                 // Images
                                 var effekseerTextures = new List<Effekseer.Internal.EffekseerTextureResource>();
@@ -349,7 +619,8 @@ namespace VCI
                                         {
                                             Texture2D texture = new Texture2D(2, 2);
                                             byte[] copyBuffer = new byte[buffer.Count];
-                                            Buffer.BlockCopy(buffer.Array, buffer.Offset, copyBuffer, 0, copyBuffer.Count());
+                                            Buffer.BlockCopy(buffer.Array, buffer.Offset, copyBuffer, 0,
+                                                copyBuffer.Count());
                                             texture.LoadImage(copyBuffer);
                                             effekseerTextures.Add(new Effekseer.Internal.EffekseerTextureResource()
                                             {
@@ -359,10 +630,9 @@ namespace VCI
                                         }
                                         else
                                         {
-                                            Debug.LogError(string.Format("image format {0} is not suppported.", image.mimeType));
+                                            Debug.LogError(string.Format("image format {0} is not suppported.",
+                                                image.mimeType));
                                         }
-
-                                        yield return null;
                                     }
                                 }
 
@@ -377,27 +647,25 @@ namespace VCI
                                         path = Path.ChangeExtension(path, "asset");
                                         var modelSegment = GLTF.GetViewBytes(model.bufferView);
                                         byte[] modelBuffer = new byte[modelSegment.Count];
-                                        Buffer.BlockCopy(modelSegment.Array, modelSegment.Offset, modelBuffer, 0, modelBuffer.Count());
+                                        Buffer.BlockCopy(modelSegment.Array, modelSegment.Offset, modelBuffer, 0,
+                                            modelBuffer.Count());
 
                                         effekseerModels.Add(new Effekseer.Internal.EffekseerModelResource()
                                         {
                                             path = path,
-                                            asset = new Effekseer.EffekseerModelAsset() { bytes = modelBuffer }
+                                            asset = new Effekseer.EffekseerModelAsset() {bytes = modelBuffer}
                                         });
-
-                                        yield return null;
                                     }
                                 }
 
-                                Effekseer.EffekseerEffectAsset effectAsset = ScriptableObject.CreateInstance<Effekseer.EffekseerEffectAsset>();
+                                Effekseer.EffekseerEffectAsset effectAsset =
+                                    ScriptableObject.CreateInstance<Effekseer.EffekseerEffectAsset>();
                                 effectAsset.name = effect.effectName;
                                 effectAsset.efkBytes = body;
                                 effectAsset.Scale = effect.scale;
                                 effectAsset.textureResources = effekseerTextures.ToArray();
                                 effectAsset.modelResources = effekseerModels.ToArray();
                                 effectAsset.soundResources = new Effekseer.Internal.EffekseerSoundResource[0];
-
-                                yield return null;
 
                                 var emitterComponent = go.AddComponent<Effekseer.EffekseerEmitter>();
                                 emitterComponent.effectAsset = effectAsset;
@@ -421,8 +689,6 @@ namespace VCI
                     }
                 }
             }
-
-            yield break;
         }
 
         public void SetupText()
@@ -430,8 +696,11 @@ namespace VCI
             for (var i = 0; i < GLTF.nodes.Count; i++)
             {
                 var node = GLTF.nodes[i];
-
-                if(node.extensions != null && node.extensions.VCAST_vci_text != null)
+                glTF_VCAST_vci_text textExtension;
+                glTF_VCAST_vci_rectTransform rectTransformExtension;
+                if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_text.ExtensionName, glTF_VCAST_vci_text_Deserializer.Deserialize, out textExtension)
+                    && node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_rectTransform.ExtensionName, glTF_VCAST_vci_rectTransform_Deserializer.Deserialize, out rectTransformExtension)
+                    )
                 {
                     var go = Nodes[i].gameObject;
                     var rt = go.AddComponent<RectTransform>();
@@ -439,12 +708,12 @@ namespace VCI
                     Nodes[i] = rt.transform;
 
                     var tmp = go.AddComponent<TextMeshPro>();
-                    var vci_text = node.extensions.VCAST_vci_text.text;
+                    var vci_text = textExtension.text;
 
                     // Get font
-                    if (FontProvider != null)
+                    if (_fontProvider != null)
                     {
-                        var font = FontProvider.GetDefaultFont();
+                        var font = _fontProvider.GetDefaultFont();
                         if (font != null) tmp.font = font;
                     }
 
@@ -453,29 +722,34 @@ namespace VCI
                     tmp.richText = vci_text.richText;
                     tmp.fontSize = vci_text.fontSize;
                     tmp.autoSizeTextContainer = vci_text.autoSize;
-                    tmp.fontStyle = (FontStyles)vci_text.fontStyle;
+                    tmp.fontStyle = (FontStyles) vci_text.fontStyle;
                     tmp.color = new Color(vci_text.color[0], vci_text.color[1], vci_text.color[2], vci_text.color[3]);
                     tmp.enableVertexGradient = vci_text.enableVertexGradient;
                     tmp.colorGradient = new VertexGradient(
-                            new Color(vci_text.topLeftColor[0], vci_text.topLeftColor[1], vci_text.topLeftColor[2], vci_text.topLeftColor[3]),
-                            new Color(vci_text.topRightColor[0], vci_text.topRightColor[1], vci_text.topRightColor[2], vci_text.topRightColor[3]),
-                            new Color(vci_text.bottomLeftColor[0], vci_text.bottomLeftColor[1], vci_text.bottomLeftColor[2], vci_text.bottomLeftColor[3]),
-                            new Color(vci_text.bottomRightColor[0], vci_text.bottomRightColor[1], vci_text.bottomRightColor[2], vci_text.bottomRightColor[3])
-                        );
+                        new Color(vci_text.topLeftColor[0], vci_text.topLeftColor[1], vci_text.topLeftColor[2],
+                            vci_text.topLeftColor[3]),
+                        new Color(vci_text.topRightColor[0], vci_text.topRightColor[1], vci_text.topRightColor[2],
+                            vci_text.topRightColor[3]),
+                        new Color(vci_text.bottomLeftColor[0], vci_text.bottomLeftColor[1], vci_text.bottomLeftColor[2],
+                            vci_text.bottomLeftColor[3]),
+                        new Color(vci_text.bottomRightColor[0], vci_text.bottomRightColor[1],
+                            vci_text.bottomRightColor[2], vci_text.bottomRightColor[3])
+                    );
                     tmp.characterSpacing = vci_text.characterSpacing;
                     tmp.wordSpacing = vci_text.wordSpacing;
                     tmp.lineSpacing = vci_text.lineSpacing;
                     tmp.paragraphSpacing = vci_text.paragraphSpacing;
-                    tmp.alignment = (TextAlignmentOptions)vci_text.alignment;
+                    tmp.alignment = (TextAlignmentOptions) vci_text.alignment;
                     tmp.enableWordWrapping = vci_text.enableWordWrapping;
                     // overflowModeのインポート時にエラーになる可能性があるので無効にする。
                     //tmp.overflowMode = (TextOverflowModes) vci_text.overflowMode;
                     tmp.enableKerning = vci_text.enableKerning;
                     tmp.extraPadding = vci_text.extraPadding;
-                    tmp.margin = new Vector4(vci_text.margin[0], vci_text.margin[1], vci_text.margin[2], vci_text.margin[3]);
+                    tmp.margin = new Vector4(vci_text.margin[0], vci_text.margin[1], vci_text.margin[2],
+                        vci_text.margin[3]);
 
                     // Set RectTransform
-                    var vci_rt = node.extensions.VCAST_vci_rectTransform.rectTransform;
+                    var vci_rt = rectTransformExtension.rectTransform;
                     rt.anchorMin = new Vector2(vci_rt.anchorMin[0], vci_rt.anchorMin[1]);
                     rt.anchorMax = new Vector2(vci_rt.anchorMax[0], vci_rt.anchorMax[1]);
                     rt.anchoredPosition = new Vector2(vci_rt.anchoredPosition[0], vci_rt.anchoredPosition[1]);
@@ -489,20 +763,22 @@ namespace VCI
 
         public void SetupSpringBone()
         {
-            if (GLTF.extensions.VCAST_vci_spring_bone == null) return;
-
-            foreach (var bone in GLTF.extensions.VCAST_vci_spring_bone.springBones)
+            glTF_VCAST_vci_spring_bone springBoneExtension;
+            if (GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_spring_bone.ExtensionName, glTF_VCAST_vci_spring_bone_Deserializer.Deserialize, out springBoneExtension))
             {
-                var sb = Root.AddComponent<VCISpringBone>();
-                if(bone.center >= 0) sb.m_center = Nodes[bone.center];
-                sb.m_dragForce = bone.dragForce;
-                sb.m_gravityDir = bone.gravityDir;
-                sb.m_gravityPower = bone.gravityPower;
-                sb.m_hitRadius = bone.hitRadius;
-                sb.m_stiffnessForce = bone.stiffiness;
-                if (bone.colliderIds != null && bone.colliderIds.Any())
-                    sb.m_colliderObjects = bone.colliderIds.Select(id => Nodes[id]).ToList();
-                sb.RootBones = bone.bones.Select(x => Nodes[x]).ToList();
+                foreach (var bone in springBoneExtension.springBones)
+                {
+                    var sb = Root.AddComponent<VCISpringBone>();
+                    if (bone.center >= 0) sb.m_center = Nodes[bone.center];
+                    sb.m_dragForce = bone.dragForce;
+                    sb.m_gravityDir = bone.gravityDir;
+                    sb.m_gravityPower = bone.gravityPower;
+                    sb.m_hitRadius = bone.hitRadius;
+                    sb.m_stiffnessForce = bone.stiffiness;
+                    if (bone.colliderIds != null && bone.colliderIds.Any())
+                        sb.m_colliderObjects = bone.colliderIds.Select(id => Nodes[id]).ToList();
+                    sb.RootBones = bone.bones.Select(x => Nodes[x]).ToList();
+                }
             }
         }
 
@@ -511,19 +787,19 @@ namespace VCI
             for (var i = 0; i < GLTF.nodes.Count; i++)
             {
                 var node = GLTF.nodes[i];
-
-                if (node.extensions != null && node.extensions.VCAST_vci_player_spawn_point != null)
+                if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_player_spawn_point.ExtensionName, glTF_VCAST_vci_player_spawn_point_Deserializer.Deserialize,
+                    out glTF_VCAST_vci_player_spawn_point playerSpawnPointExtension))
                 {
                     var go = Nodes[i].gameObject;
                     var spawnPoint = go.AddComponent<VCIPlayerSpawnPoint>();
-                    spawnPoint.Order = node.extensions.VCAST_vci_player_spawn_point.playerSpawnPoint.order;
-                    spawnPoint.Radius = node.extensions.VCAST_vci_player_spawn_point.playerSpawnPoint.radius;
+                    spawnPoint.Order = playerSpawnPointExtension.playerSpawnPoint.order;
+                    spawnPoint.Radius = playerSpawnPointExtension.playerSpawnPoint.radius;
 
-                    if (node.extensions.VCAST_vci_player_spawn_point_restriction != null)
+                    if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_player_spawn_point_restriction.ExtensionName, glTF_VCAST_vci_player_spawn_point_restriction_Deserializer.Deserialize,
+                        out glTF_VCAST_vci_player_spawn_point_restriction playerSpawnPointRestrictionExtension))
                     {
                         var spawnPointRestriction = go.AddComponent<VCIPlayerSpawnPointRestriction>();
-                        var nodePspR = node.extensions.VCAST_vci_player_spawn_point_restriction
-                            .playerSpawnPointRestriction;
+                        var nodePspR = playerSpawnPointRestrictionExtension.playerSpawnPointRestriction;
                         switch (nodePspR.rangeOfMovementRestriction)
                         {
                             case glTF_VCAST_vci_PlayerSpawnPointRestriction.Circle:
@@ -538,7 +814,7 @@ namespace VCI
                                 break;
                         }
 
-                        spawnPointRestriction.LimitRadius = node.extensions.VCAST_vci_player_spawn_point_restriction
+                        spawnPointRestriction.LimitRadius = playerSpawnPointRestrictionExtension
                             .playerSpawnPointRestriction.limitRadius;
                         spawnPointRestriction.LimitRectLeft = nodePspR.limitRectLeft;
                         spawnPointRestriction.LimitRectRight = nodePspR.limitRectRight;
@@ -555,6 +831,8 @@ namespace VCI
                                 spawnPointRestriction.PostureRestriction = Posture.NoLimit;
                                 break;
                         }
+
+                        spawnPointRestriction.SeatHeight = nodePspR.seatHeight;
                     }
                 }
             }
@@ -562,22 +840,164 @@ namespace VCI
 
         public void SetupLocationBounds()
         {
-            if (GLTF.extensions.VCAST_vci_location_bounds == null) return;
-
-            var locationBounds = Root.AddComponent<VCILocationBounds>();
-            var values = GLTF.extensions.VCAST_vci_location_bounds.LocationBounds;
-            locationBounds.Bounds = new Bounds(values.bounds_center, values.bounds_size);
+            glTF_VCAST_vci_location_bounds locationBoundsExtension;
+            if (GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_location_bounds.ExtensionName, glTF_VCAST_vci_location_bounds_Deserializer.Deserialize, out locationBoundsExtension))
+            {
+                var locationBounds = Root.AddComponent<VCILocationBounds>();
+                var values = locationBoundsExtension.LocationBounds;
+                locationBounds.Bounds = new Bounds(values.bounds_center, values.bounds_size);
+            }
         }
 
+        public IEnumerator SetupLightmapCoroutine()
+        {
+            var supportImporting = Application.isPlaying;
+            if (!supportImporting)
+            {
+                yield break;
+            }
+
+            glTF_VCAST_vci_location_lighting locationLightingExtension;
+            if (!GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_location_lighting.ExtensionName, glTF_VCAST_vci_location_lighting_Deserializer.Deserialize, out locationLightingExtension))
+            {
+                yield break;
+            }
+
+            if(locationLightingExtension.locationLighting == null)
+            {
+                yield break;
+            }
+
+            var locationLighting = locationLightingExtension.locationLighting;
+
+            // 現在のところはこの組み合わせしかサポートしない
+            if (locationLighting.skyboxCubemap.GetSkyboxCompressionModeAsEnum() !=
+                CubemapCompressionType.Rgbm) yield break;
+            if (locationLighting.GetLightmapCompressionModeAsEnum() != LightmapCompressionType.Rgbm) yield break;
+            if (locationLighting.GetLightmapDirectionalModeAsEnum() != LightmapDirectionalType.NonDirectional)
+                yield break;
+
+            // Lightmap
+            var lightmapCompressionMode = locationLighting.GetLightmapCompressionModeAsEnum();
+            var lightmapDirectionalMode = locationLighting.GetLightmapDirectionalModeAsEnum();
+            var lightmapTextureImporter =
+                new LightmapTextureImporter(GetTexture, lightmapCompressionMode, lightmapDirectionalMode);
+            var colorTextures = new List<Texture2D>();
+            for (var idx = 0; idx < locationLighting.lightmapTextures.Length; ++idx)
+            {
+                var x = locationLighting.lightmapTextures[idx];
+                var importerResult = new LightmapTextureImporterResult();
+                yield return lightmapTextureImporter.GetOrConvertColorTextureCoroutine(x.index, importerResult);
+                colorTextures.Add(importerResult.Result);
+            }
+
+            for (var i = 0; i < GLTF.nodes.Count; i++)
+            {
+                var node = GLTF.nodes[i];
+                glTF_VCAST_vci_lightmap lightmapExtension;
+                if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_lightmap.ExtensionName, glTF_VCAST_vci_lightmap_Deserializer.Deserialize, out lightmapExtension))
+                {
+                    var go = Nodes[i].gameObject;
+                    var renderer = go.GetComponent<MeshRenderer>();
+                    if (renderer == null) continue;
+
+                    var lightmap = lightmapExtension.lightmap;
+                    var importerResult = new LightmapTextureImporterResult();
+                    yield return lightmapTextureImporter.GetOrConvertColorTextureCoroutine(lightmap.texture.index,
+                        importerResult);
+                    var offset = new Vector2(lightmap.offset[0], lightmap.offset[1]);
+                    var scale = new Vector2(lightmap.scale[0], lightmap.scale[1]);
+
+                    // Coordinate conversion
+                    offset.y = (offset.y + scale.y - 1.0f) * -1.0f;
+
+                    // Get LightmapData Index
+                    var lightmapDataIndex = colorTextures.FindIndex(x => x == importerResult.Result);
+                    if (lightmapDataIndex == -1) continue;
+
+                    // Apply to Renderer
+                    renderer.lightmapIndex = lightmapDataIndex;
+                    renderer.lightmapScaleOffset = new Vector4(scale.x, scale.y, offset.x, offset.y);
+                }
+            }
+
+            // Ambient Lighting
+            var skyboxCompressionMode = locationLighting.skyboxCubemap.GetSkyboxCompressionModeAsEnum();
+            var skyboxCubemapImporter = new CubemapTextureImporter(GetTexture, skyboxCompressionMode);
+            var skyboxImporter = new SkyboxImporter(skyboxCubemapImporter);
+            var lightProbeImporter = new LightProbeImporter();
+
+            var behaviour = Root.AddComponent<VCILocationLighting>();
+            behaviour.LightmapDataArray = colorTextures.Select(x => new LightmapData {lightmapColor = x}).ToArray();
+            switch (lightmapDirectionalMode)
+            {
+                case LightmapDirectionalType.Directional:
+                    behaviour.LightmapMode = LightmapsMode.CombinedDirectional;
+                    break;
+                case LightmapDirectionalType.NonDirectional:
+                    behaviour.LightmapMode = LightmapsMode.NonDirectional;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+
+            var skyboxResult = new SkyboxImporterResult();
+            yield return skyboxImporter.CovertToSkyboxCoroutine(locationLighting.skyboxCubemap, skyboxResult);
+            behaviour.Skybox = skyboxResult.Result;
+            var (lightProbePosArray, lightProbeCoefficientArray) =
+                lightProbeImporter.Import(locationLighting.lightProbes);
+            behaviour.LightProbePositions = lightProbePosArray;
+            behaviour.LightProbeCoefficients = lightProbeCoefficientArray;
+
+            yield return null;
+
+
+            // ReflectionProbe
+            for (var i = 0; i < GLTF.nodes.Count; i++)
+            {
+                var node = GLTF.nodes[i];
+                glTF_VCAST_vci_reflectionProbe reflectionProbeExtension;
+                if (node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_reflectionProbe.ExtensionName, glTF_VCAST_vci_reflectionProbe_Deserializer.Deserialize, out reflectionProbeExtension))
+                {
+                    var go = Nodes[i].gameObject;
+                    var reflectionProbe = go.AddComponent<ReflectionProbe>();
+
+                    var data = reflectionProbeExtension.reflectionProbe;
+                    var gltfOffset = data.boxOffset;
+                    var gltfSize = data.boxSize;
+                    var cubemapImporter =
+                        new CubemapTextureImporter(GetTexture, data.cubemap.GetSkyboxCompressionModeAsEnum());
+
+                    var cubemapResult = new CubemapTextureImporterResult();
+                    yield return cubemapImporter.ConvertCubemapCoroutine(data.cubemap, cubemapResult);
+
+                    reflectionProbe.center = new Vector3(-gltfOffset[0], gltfOffset[1], gltfOffset[2]); // Invert X-axis
+                    reflectionProbe.size = new Vector3(gltfSize[0], gltfSize[1], gltfSize[2]);
+                    reflectionProbe.intensity = data.intensity;
+                    reflectionProbe.boxProjection = data.useBoxProjection;
+                    reflectionProbe.bakedTexture = cubemapResult.Result;
+
+                    reflectionProbe.mode = ReflectionProbeMode.Baked;
+                }
+            }
+        }
 
         public void ExtractAudio(UnityPath prefabPath)
         {
 #if UNITY_EDITOR
 
-            if (GLTF.extensions.VCAST_vci_audios == null
-                || GLTF.extensions.VCAST_vci_audios.audios == null
-                || GLTF.extensions.VCAST_vci_audios.audios.Count == 0)
+            glTF_VCAST_vci_audios audioExtension;
+            if (!GLTF.extensions.TryDeserializeExtensions(glTF_VCAST_vci_audios.ExtensionName, glTF_VCAST_vci_audios_Deserializer.Deserialize, out audioExtension))
+            {
                 return;
+            }
+
+            if( audioExtension == null
+                || audioExtension.audios == null
+                || audioExtension.audios.Count == 0)
+            {
+                return;
+            }
 
             var prefabParentDir = prefabPath.Parent;
 
@@ -585,10 +1005,10 @@ namespace VCI
             var folder = prefabPath.GetAssetFolder(".Audios");
 
             var created = 0;
-            for (var i = 0; i < GLTF.extensions.VCAST_vci_audios.audios.Count; ++i)
+            for (var i = 0; i < audioExtension.audios.Count; ++i)
             {
                 folder.EnsureFolder();
-                var audio = GLTF.extensions.VCAST_vci_audios.audios[i];
+                var audio = audioExtension.audios[i];
                 var bytes = GLTF.GetViewBytes(audio.bufferView);
 
                 var audioBuffer = new byte[bytes.Count];
@@ -601,7 +1021,7 @@ namespace VCI
                         | System.Text.RegularExpressions.RegexOptions.Singleline);
                 var match = r.Match(audio.mimeType);
                 var ext = match.Groups["ext"].Value;
-                if(!string.IsNullOrEmpty(ext))
+                if (!string.IsNullOrEmpty(ext))
                 {
                     var path = string.Format("{0}/{1}.{2}", folder.Value, audio.name, ext);
                     File.WriteAllBytes(path, audioBuffer);
@@ -619,18 +1039,26 @@ namespace VCI
         {
 #if UNITY_EDITOR
 
-            if (GLTF.extensions.Effekseer == null
-                || GLTF.extensions.Effekseer.effects == null
-                || GLTF.extensions.Effekseer.effects.Count == 0)
+            glTF_Effekseer effekseerExtension;
+            if (!GLTF.extensions.TryDeserializeExtensions(glTF_Effekseer.ExtensionName, glTF_Effekseer_Deserializer.Deserialize, out effekseerExtension))
+            {
                 return;
+            }
+
+            if (effekseerExtension == null
+                || effekseerExtension.effects == null
+                || effekseerExtension.effects.Count == 0)
+            {
+                return;
+            }
 
             var prefabParentDir = prefabPath.Parent;
             var folder = prefabPath.GetAssetFolder(".Effekseers");
 
-            for (var i = 0; i < GLTF.extensions.Effekseer.effects.Count; ++i)
+            for (var i = 0; i < effekseerExtension.effects.Count; ++i)
             {
                 folder.EnsureFolder();
-                var effect = GLTF.extensions.Effekseer.effects[i];
+                var effect = effekseerExtension.effects[i];
                 var effectDir = string.Format("{0}/{1}", folder.Value, effect.effectName);
                 SafeCreateDirectory(effectDir);
                 var textureDir = string.Format("{0}/{1}", effectDir, "Textures");
@@ -690,8 +1118,8 @@ namespace VCI
                     foreach (var texturePath in writeTexturePathList)
                     {
                         AssetDatabase.ImportAsset(texturePath);
-                        var textureImporter = (TextureImporter)TextureImporter.GetAtPath(texturePath);
-                        if(textureImporter != null)
+                        var textureImporter = (TextureImporter) TextureImporter.GetAtPath(texturePath);
+                        if (textureImporter != null)
                         {
                             textureImporter.isReadable = true;
                             textureImporter.textureCompression = TextureImporterCompression.Uncompressed;
@@ -702,13 +1130,15 @@ namespace VCI
                     // efk
                     var assetPath = string.Format("{0}/{1}.efk", effectDir, effect.effectName);
                     Effekseer.EffekseerEffectAsset.CreateAsset(assetPath, body);
-                    var effectAsset = AssetDatabase.LoadAssetAtPath<Effekseer.EffekseerEffectAsset>(System.IO.Path.ChangeExtension(assetPath, "asset"));
+                    var effectAsset =
+                        AssetDatabase.LoadAssetAtPath<Effekseer.EffekseerEffectAsset>(
+                            System.IO.Path.ChangeExtension(assetPath, "asset"));
                     EffekseerEffectAssets.Add(effectAsset);
 
 
                     // find assets
                     // textures
-                    for(int t = 0; t < effectAsset.textureResources.Count(); t++)
+                    for (int t = 0; t < effectAsset.textureResources.Count(); t++)
                     {
                         var path = effectAsset.textureResources[t].path;
                         if (string.IsNullOrEmpty(path))
@@ -721,7 +1151,7 @@ namespace VCI
                         Texture2D texture = UnityEditor.AssetDatabase.LoadAssetAtPath(
                             string.Format("{0}/{1}", textureDir, fileName), typeof(Texture2D)) as Texture2D;
 
-                        if(texture != null)
+                        if (texture != null)
                         {
                             effectAsset.textureResources[t].texture = texture;
                         }
@@ -739,7 +1169,8 @@ namespace VCI
                             continue;
 
                         Effekseer.EffekseerModelAsset model = UnityEditor.AssetDatabase.LoadAssetAtPath(
-                            string.Format("{0}/{1}", modelDir, fileName), typeof(Effekseer.EffekseerModelAsset)) as Effekseer.EffekseerModelAsset;
+                                string.Format("{0}/{1}", modelDir, fileName), typeof(Effekseer.EffekseerModelAsset)) as
+                            Effekseer.EffekseerModelAsset;
 
                         if (model != null)
                         {
@@ -763,21 +1194,24 @@ namespace VCI
             folder.EnsureFolder();
 
             var animationClips = new AnimationClip[GLTF.animations.Count];
-            for (int i = 0;i < GLTF.nodes.Count; i++)
+            for (int i = 0; i < GLTF.nodes.Count; i++)
             {
                 var node = GLTF.nodes[i];
-                if (node.extensions == null || node.extensions.VCAST_vci_animation == null)
+                glTF_VCAST_vci_animation animationProbeExtension;
+                if (!node.extensions.TryDeserializeExtensions(glTF_VCAST_vci_animation.ExtensionName, glTF_VCAST_vci_animation_Deserializer.Deserialize, out animationProbeExtension))
+                {
                     continue;
+                }
 
-                var vciAnimation = node.extensions.VCAST_vci_animation;
+                var vciAnimation = animationProbeExtension;
 
                 foreach (var animationReference in vciAnimation.animationReferences)
                 {
                     var gltfAnimation = GLTF.animations[animationReference.animation];
                     AnimationClip clip = null;
-                    if(animationClips[animationReference.animation] == null)
+                    if (animationClips[animationReference.animation] == null)
                     {
-                        clip = AnimationImporterUtil.ImportAnimationClip(this, gltfAnimation, node);
+                        clip = AnimationImporterUtil.ConvertAnimationClip(GLTF, gltfAnimation, node);
                         animationClips[animationReference.animation] = clip;
                     }
                 }
@@ -787,13 +1221,13 @@ namespace VCI
             for (var i = 0; i < animationClips.Length; i++)
             {
                 if (animationClips[i] != null) continue;
-                animationClips[i] = AnimationImporterUtil.ImportAnimationClip(this, GLTF.animations[i]);
+                animationClips[i] = AnimationImporterUtil.ConvertAnimationClip(GLTF, GLTF.animations[i]);
             }
 
             var saveAnimationPath = new string[GLTF.animations.Count];
-            for(int i = 0;i<animationClips.Count();i++)
+            for (int i = 0; i < animationClips.Count(); i++)
             {
-                if(animationClips[i] != null)
+                if (animationClips[i] != null)
                 {
                     var path = string.Format("{0}/{1}.{2}", folder.Value, animationClips[i].name, "asset");
                     AssetDatabase.CreateAsset(animationClips[i], path);
@@ -805,15 +1239,47 @@ namespace VCI
             AssetDatabase.Refresh();
 
             var saveAnimationClips = new AnimationClip[GLTF.animations.Count];
-            for(int i = 0;i<saveAnimationPath.Count();i++)
+            for (int i = 0; i < saveAnimationPath.Count(); i++)
             {
-                if(!string.IsNullOrEmpty(saveAnimationPath[i]))
+                if (!string.IsNullOrEmpty(saveAnimationPath[i]))
                 {
-                    saveAnimationClips[i] = AssetDatabase.LoadAssetAtPath(saveAnimationPath[i], typeof(AnimationClip)) as AnimationClip;
+                    saveAnimationClips[i] =
+                        AssetDatabase.LoadAssetAtPath(saveAnimationPath[i], typeof(AnimationClip)) as AnimationClip;
                 }
             }
 
             AnimationClips = new List<AnimationClip>(saveAnimationClips);
+#endif
+        }
+
+
+        public void ExportScriptFile(UnityPath prefabPath)
+        {
+#if UNITY_EDITOR
+            var prefabParentDir = prefabPath.Parent;
+            var folder = prefabPath.GetAssetFolder(".Scripts");
+            folder.EnsureFolder();
+
+            var vciObject = this.Root.GetComponent<VCIObject>();
+            if (vciObject == null)
+            {
+                return;
+            }
+
+            foreach (var script in vciObject.Scripts)
+            {
+                var scriptPath = $"{folder.Value}/{script.name}.lua";
+                Debug.Log(scriptPath);
+                File.WriteAllBytes(scriptPath, System.Text.Encoding.UTF8.GetBytes(script.source));
+            }
+
+            AssetDatabase.Refresh();
+
+            foreach (var script in vciObject.Scripts)
+            {
+                var scriptPath = $"{folder.Value}/{script.name}.lua";
+                script.textAsset = AssetDatabase.LoadAssetAtPath<TextAsset>(scriptPath);
+            }
 #endif
         }
 
@@ -826,11 +1292,12 @@ namespace VCI
                 {
                     return null;
                 }
+
                 var info = Directory.CreateDirectory(path);
                 AssetDatabase.ImportAsset(path);
                 return info;
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 throw ex;
             }
@@ -876,14 +1343,14 @@ namespace VCI
 
             #region Model Data License Url
 
-            [Header("Model Data License")] public glTF_VCAST_vci_meta.LicenseType modelDataLicenseType;
+            [Header("Model Data License")] public LicenseType modelDataLicenseType;
             public string modelDataOtherLicenseUrl;
 
             #endregion
 
             #region Script License Url
 
-            [Header("Script License")] public glTF_VCAST_vci_meta.LicenseType scriptLicenseType;
+            [Header("Script License")] public LicenseType scriptLicenseType;
             public string scriptOtherLicenseUrl;
 
             #endregion
@@ -893,20 +1360,20 @@ namespace VCI
             [Header("Script Settings")] public bool scriptWriteProtected;
             public bool scriptEnableDebugging;
 
-            public glTF_VCAST_vci_meta.ScriptFormat scriptFormat;
+            public ScriptFormat scriptFormat;
 
             #endregion
         }
 
         public IEnumerator ToUnity(Action<Meta> callback)
         {
-            if (GLTF.extensions.VCAST_vci_meta == null)
+            if (VciMeta == null)
             {
                 callback(default(Meta));
                 yield break;
             }
 
-            var meta = GLTF.extensions.VCAST_vci_meta;
+            var meta = VciMeta;
             if (meta == null)
             {
                 callback(default(Meta));
@@ -970,11 +1437,6 @@ namespace VCI
             };
 
             return importer;
-        }
-
-        public interface IFontProvider
-        {
-            TMP_FontAsset GetDefaultFont();
         }
 
         public void AddMeshWitMaterials(MeshWithMaterials meshWithMats)
